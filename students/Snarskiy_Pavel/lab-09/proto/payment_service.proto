@@ -1,0 +1,50 @@
+syntax = "proto3";
+ 
+package restaurant;
+ 
+message InitiatePaymentRequest {
+  string order_id        = 1;
+  string payment_method  = 2;  // CARD, CASH, QR
+  double amount          = 3;
+  double tip             = 4;
+  string idempotency_key = 5;
+}
+ 
+message InitiatePaymentResponse {
+  string payment_id = 1;
+  string status     = 2;  // PENDING
+  double amount     = 3;
+}
+ 
+message ConfirmPaymentRequest {
+  string payment_id      = 1;
+  string transaction_id  = 2;
+}
+ 
+message ConfirmPaymentResponse {
+  string payment_id     = 1;
+  string status         = 2;  // COMPLETED
+  string transaction_id = 3;
+}
+ 
+message GetPaymentRequest {
+  string payment_id = 1;
+}
+ 
+message PaymentDto {
+  string payment_id     = 1;
+  string order_id       = 2;
+  double amount         = 3;
+  string currency       = 4;
+  string method         = 5;
+  string status         = 6;
+  int32  retry_count    = 7;
+  string transaction_id = 8;
+  string created_at     = 9;
+}
+ 
+service PaymentService {
+  rpc InitiatePayment(InitiatePaymentRequest) returns (InitiatePaymentResponse);
+  rpc ConfirmPayment(ConfirmPaymentRequest)   returns (ConfirmPaymentResponse);
+  rpc GetPayment(GetPaymentRequest)           returns (PaymentDto);
+}

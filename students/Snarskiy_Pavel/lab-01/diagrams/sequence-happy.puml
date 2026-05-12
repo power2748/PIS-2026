@@ -1,0 +1,126 @@
+@startuml
+title Успешный сценарий: Создание заказа и отправка на кухню
+
+actor "Официант" as Waiter
+participant "API Gateway" as Gateway
+participant "Order Service" as OrderSvc
+participant "Menu &\nInventory Service" as MenuSvc
+database "PostgreSQL" as DB
+participant "Kitchen Service" as KitchenSvc
+queue "Event Bus\n(RabbitMQ)" as Bus
+participant "Notification\nWorker" as NotifyWorker
+participant "KDS\n(Kitchen Display)" as KDS
+
+== Транзакция №1: Создание заказа ==
+
+Waiter -> Gateway: POST /api/orders\n{table_id: 12,\nguests: 2,\nitems: [{dish_id: "D-01", qty: 1},\n         {dish_id: "D-07", qty: 1},\n         {dish_id: "D-12", qty: 2}],\ncomment: "Стейк medium, без глютена"}
+activate Gateway
+
+Gateway -> Gateway: Аутентификация\nи авторизация
+Gateway -> OrderSvc: Пересылка запроса
+activate OrderSvc
+
+OrderSvc -> OrderSvc: Валидация данных\n(столик, состав заказа)
+
+OrderSvc -> MenuSvc: checkAvailability(items)
+activate MenuSvc
+MenuSvc -> MenuSvc: Проверка стоп-листа\nи остатков ингредиентов
+MenuSvc --> OrderSvc: [D-01: OK, D-07: OK,\nD-12: OK]
+deactivate MenuSvc
+
+OrderSvc -> DB: BEGIN TRANSACTION
+activate DB
+
+OrderSvc -> DB: INSERT INTO orders\n(id, table_id, guests, status, comment)\nVALUES ('ORD-2024-0318', 12, 2, 'NEW', ...)
+DB --> OrderSvc: OK
+
+OrderSvc -> DB: INSERT INTO order_items\n(order_id, dish_id, qty, comment)\nFOR order_id='ORD-2024-0318'
+DB --> OrderSvc: OK
+
+OrderSvc -> DB: UPDATE tables\nSET status='OCCUPIED',\nactive_order_id='ORD-2024-0318'\nWHERE id=12
+DB --> OrderSvc: OK
+
+OrderSvc -> DB: UPDATE ingredient_stock\nSET reserved=reserved+qty\nFOR items IN order
+DB --> OrderSvc: OK
+
+OrderSvc -> DB: COMMIT TRANSACTION
+DB --> OrderSvc: Committed
+deactivate DB
+
+OrderSvc -> Bus: publish(OrderCreated,\norder_id='ORD-2024-0318')
+activate Bus
+Bus --> OrderSvc: ACK
+deactivate Bus
+
+OrderSvc --> Gateway: 201 Created\n{order_id: "ORD-2024-0318",\nitems: [...], total: 4750.00}
+deactivate OrderSvc
+
+Gateway --> Waiter: 201 Created\n{order_id, items, total}
+deactivate Gateway
+
+== Транзакция №2: Отправка на кухню ==
+
+Waiter -> Gateway: POST /api/orders/ORD-2024-0318/send\n{confirmed: true}
+activate Gateway
+
+Gateway -> KitchenSvc: Пересылка запроса
+activate KitchenSvc
+
+KitchenSvc -> DB: BEGIN TRANSACTION
+activate DB
+
+KitchenSvc -> DB: SELECT * FROM orders\nWHERE id='ORD-2024-0318'\nFOR UPDATE
+DB --> KitchenSvc: order (status='NEW')
+
+KitchenSvc -> DB: INSERT INTO kitchen_tickets\n(id, order_id, status)\nVALUES ('KT-318', 'ORD-2024-0318', 'PENDING')
+DB --> KitchenSvc: OK
+
+KitchenSvc -> DB: INSERT INTO ticket_items\n(ticket_id='KT-318',\ndish_id, station, priority)\nVALUES\n('D-01', 'GRILL', HIGH),\n('D-07', 'PASTA', NORMAL),\n('D-12', 'DESSERT', LOW)
+DB --> KitchenSvc: OK
+
+KitchenSvc -> DB: UPDATE orders\nSET status='IN_PROGRESS'\nWHERE id='ORD-2024-0318'
+DB --> KitchenSvc: OK
+
+KitchenSvc -> DB: COMMIT TRANSACTION
+DB --> KitchenSvc: Committed
+deactivate DB
+
+KitchenSvc -> Bus: publish(OrderSentToKitchen,\norder_id='ORD-2024-0318')
+activate Bus
+Bus --> KitchenSvc: ACK
+
+KitchenSvc -> Bus: publish(KitchenTicketCreated,\nticket_id='KT-318')
+Bus --> KitchenSvc: ACK
+deactivate Bus
+
+KitchenSvc --> Gateway: 201 Created\n{ticket_id: "KT-318",\nstations: [GRILL, PASTA, DESSERT],\neta_minutes: 25}
+deactivate KitchenSvc
+
+Gateway --> Waiter: 201 Created\n{ticket_id, stations, eta_minutes}
+deactivate Gateway
+
+== Асинхронная отправка уведомлений ==
+
+Bus -> NotifyWorker: consume(KitchenTicketCreated)
+activate NotifyWorker
+
+NotifyWorker -> NotifyWorker: Формирование\nтикетов по станциям
+
+NotifyWorker -> KDS: sendToStation(GRILL,\n{ticket: "KT-318",\ndish: "Стейк Рибай",\ncomment: "medium",\npriority: HIGH})
+activate KDS
+KDS --> NotifyWorker: display_id: kds-grill-01\nStatus: displayed
+deactivate KDS
+
+NotifyWorker -> KDS: sendBulkToStations(\n[PASTA, DESSERT],\n{ticket: "KT-318", items: [...]})
+activate KDS
+KDS --> NotifyWorker: 2 станции уведомлены
+deactivate KDS
+
+NotifyWorker -> DB: UPDATE notification_queue\nSET status='delivered'
+activate DB
+DB --> NotifyWorker: OK
+deactivate DB
+
+deactivate NotifyWorker
+
+@enduml

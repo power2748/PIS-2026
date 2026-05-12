@@ -1,0 +1,64 @@
+version: "3.9"
+ 
+services:
+ 
+  app:
+    build: .
+    container_name: restaurant_app
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://restaurant:secret@db:5432/restaurant_db
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: uvicorn infrastructure.main:app --host 0.0.0.0 --port 8000 --reload
+ 
+  db:
+    image: postgres:15-alpine
+    container_name: restaurant_db
+    environment:
+      POSTGRES_DB:       restaurant_db
+      POSTGRES_USER:     restaurant
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U restaurant -d restaurant_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+ 
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: restaurant_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+ 
+  migrations:
+    build: .
+    container_name: restaurant_migrations
+    environment:
+      DATABASE_URL: postgresql://restaurant:secret@db:5432/restaurant_db
+    depends_on:
+      db:
+        condition: service_healthy
+    command: alembic upgrade head
+    restart: "no"
+ 
+volumes:
+  postgres_data:

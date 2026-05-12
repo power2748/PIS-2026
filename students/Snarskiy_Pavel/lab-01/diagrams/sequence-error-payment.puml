@@ -1,0 +1,142 @@
+@startuml
+title Сценарий с ошибкой: Payment Service недоступен
+
+actor "Официант" as Waiter
+participant "API Gateway" as Gateway
+participant "Payment Service" as PaySvc
+database "PostgreSQL" as DB
+queue "Event Bus\n(RabbitMQ)" as Bus
+participant "Payment\nWorker" as PayWorker
+participant "Acquiring\nGateway\n(Stripe)" as Stripe
+
+note over Waiter, Stripe
+  Заказ ORD-2024-0318 выполнен.
+  Официант формирует счёт и проводит оплату.
+end note
+
+Waiter -> Gateway: POST /api/orders/ORD-2024-0318/pay\n{method: "CARD",\namount: 4750.00,\ntip: 475.00}
+activate Gateway
+
+Gateway -> PaySvc: Пересылка запроса
+activate PaySvc
+
+PaySvc -> DB: BEGIN TRANSACTION
+activate DB
+
+PaySvc -> DB: SELECT * FROM orders\nWHERE id='ORD-2024-0318'\nAND status='READY'\nFOR UPDATE
+DB --> PaySvc: order\n(total=4750.00)
+
+PaySvc -> DB: INSERT INTO payments\n(id='PAY-0318', order_id='ORD-2024-0318',\namount=5225.00, status='PENDING')
+DB --> PaySvc: OK
+
+PaySvc -> DB: UPDATE orders\nSET status='AWAITING_PAYMENT'\nWHERE id='ORD-2024-0318'
+DB --> PaySvc: OK
+
+PaySvc -> DB: COMMIT TRANSACTION
+DB --> PaySvc: Committed
+deactivate DB
+
+note over PaySvc
+  Платёж зарегистрирован в БД.
+  Отправка в эквайринг асинхронна.
+end note
+
+PaySvc -> Bus: publish(PaymentInitiated,\npayment_id='PAY-0318')
+activate Bus
+Bus --> PaySvc: ACK
+deactivate Bus
+
+PaySvc --> Gateway: 202 Accepted\n{payment_id: "PAY-0318",\nstatus: "PENDING"}
+deactivate PaySvc
+
+Gateway --> Waiter: 202 Accepted\n{payment_id: "PAY-0318",\nstatus: "PENDING"}
+deactivate Gateway
+
+note over Waiter
+  Официант получил подтверждение
+  регистрации платежа. Ожидание...
+end note
+
+== Асинхронная обработка платежа ==
+
+Bus -> PayWorker: consume(PaymentInitiated)
+activate PayWorker
+
+PayWorker -> PayWorker: Подготовка\nданных транзакции
+
+PayWorker -> Stripe: chargeCard(\n{payment_id: "PAY-0318",\namount: 5225.00,\ncurrency: "RUB",\ncard_token: "tok_xyz"})
+activate Stripe
+
+note over Stripe #FFAAAA
+  Acquiring Gateway недоступен!
+  Connection timeout 15s
+end note
+
+Stripe --x PayWorker: TimeoutException\nafter 15s
+deactivate Stripe
+
+PayWorker -> PayWorker: Обработка ошибки:\n- НЕ откатываем платёж из БД\n- Помещаем в retry queue
+
+PayWorker -> DB: UPDATE payments\nSET status='RETRY_PENDING',\nretry_count=1,\nlast_error='Acquiring timeout',\nnext_retry_at=NOW()+3min\nWHERE id='PAY-0318'
+activate DB
+DB --> PayWorker: OK
+deactivate DB
+
+PayWorker -> Bus: publish(PaymentFailed,\npayment_id='PAY-0318',\nreason='Acquiring timeout')
+activate Bus
+Bus --> PayWorker: ACK
+deactivate Bus
+
+note over PayWorker #FFFFAA
+  Платёж поставлен в очередь повтора.
+  Фоновый worker повторит попытку
+  через 3 минуты (макс. 3 попытки).
+end note
+
+deactivate PayWorker
+
+== Повторная попытка через 3 минуты ==
+
+PayWorker -> PayWorker: Запланировано\nповторное выполнение
+
+
+activate PayWorker
+PayWorker -> DB: SELECT * FROM payments\nWHERE status='RETRY_PENDING'\nAND next_retry_at <= NOW()
+activate DB
+DB --> PayWorker: 1 запись\n(payment_id='PAY-0318')
+deactivate DB
+
+PayWorker -> Stripe: chargeCard(\n{payment_id: "PAY-0318",\namount: 5225.00, ...})
+activate Stripe
+Stripe --> PayWorker: transaction_id: "txn-9981"\nStatus: succeeded ✅
+deactivate Stripe
+
+PayWorker -> DB: BEGIN TRANSACTION
+activate DB
+
+PayWorker -> DB: UPDATE payments\nSET status='COMPLETED',\ntransaction_id='txn-9981',\npaid_at=NOW()\nWHERE id='PAY-0318'
+DB --> PayWorker: OK
+
+PayWorker -> DB: UPDATE orders\nSET status='PAID'\nWHERE id='ORD-2024-0318'
+DB --> PayWorker: OK
+
+PayWorker -> DB: UPDATE tables\nSET status='FREE',\nactive_order_id=NULL\nWHERE id=12
+DB --> PayWorker: OK
+
+PayWorker -> DB: COMMIT TRANSACTION
+DB --> PayWorker: Committed
+deactivate DB
+
+PayWorker -> Bus: publish(PaymentCompleted,\npayment_id='PAY-0318',\norder_id='ORD-2024-0318')
+activate Bus
+Bus --> PayWorker: ACK
+deactivate Bus
+
+note over PayWorker #AAFFAA
+  Оплата проведена успешно!
+  Столик освобождён.
+end note
+
+deactivate PayWorker
+
+@enduml

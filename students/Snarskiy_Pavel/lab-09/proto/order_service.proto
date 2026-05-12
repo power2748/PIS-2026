@@ -1,0 +1,90 @@
+syntax = "proto3";
+ 
+package restaurant;
+ 
+option py_generic_services = true;
+ 
+// ── Сообщения ─────────────────────────────────────────────────────
+ 
+message OrderItemProto {
+  string dish_id   = 1;
+  string dish_name = 2;
+  int32  quantity  = 3;
+  double price     = 4;
+  string station   = 5;  // GRILL, PASTA, DESSERT, BAR, COLD
+  string comment   = 6;  // optional
+}
+ 
+message CreateOrderRequest {
+  int32               table_id        = 1;
+  int32               guests          = 2;
+  repeated OrderItemProto items       = 3;
+  string              comment         = 4;
+  string              idempotency_key = 5;
+  string              waiter_id       = 6;
+}
+ 
+message CreateOrderResponse {
+  string order_id  = 1;
+  string status    = 2;  // "NEW"
+  double total     = 3;
+  string currency  = 4;
+}
+ 
+message GetOrderRequest {
+  string order_id = 1;
+}
+ 
+message OrderDto {
+  string   order_id       = 1;
+  int32    table_id       = 2;
+  int32    guests         = 3;
+  string   status         = 4;
+  string   status_label   = 5;
+  double   total          = 6;
+  string   currency       = 7;
+  int32    version        = 8;
+  string   comment        = 9;
+  repeated OrderItemProto items = 10;
+  string   ticket_id      = 11;
+  string   payment_id     = 12;
+  string   created_at     = 13;
+  string   updated_at     = 14;
+}
+ 
+message MarkOrderReadyRequest {
+  string order_id  = 1;
+  string ticket_id = 2;
+}
+ 
+message MarkOrderReadyResponse {
+  string order_id = 1;
+  string status   = 2;
+}
+ 
+message ListActiveOrdersRequest {
+  int32  page        = 1;
+  int32  page_size   = 2;
+  string status_filter = 3;
+}
+ 
+message ListActiveOrdersResponse {
+  repeated OrderDto orders = 1;
+  int32             total  = 2;
+}
+ 
+// ── Service ───────────────────────────────────────────────────────
+ 
+service OrderService {
+  // Unary RPC: создать заказ
+  rpc CreateOrder(CreateOrderRequest) returns (CreateOrderResponse);
+ 
+  // Unary RPC: получить заказ
+  rpc GetOrder(GetOrderRequest) returns (OrderDto);
+ 
+  // Unary RPC: пометить заказ готовым (вызывает Kitchen Service)
+  rpc MarkOrderReady(MarkOrderReadyRequest) returns (MarkOrderReadyResponse);
+ 
+  // Server-side streaming: получать обновления статусов всех активных заказов
+  rpc StreamActiveOrders(ListActiveOrdersRequest) returns (stream OrderDto);
+}

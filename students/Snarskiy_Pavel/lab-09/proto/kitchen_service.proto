@@ -1,0 +1,71 @@
+syntax = "proto3";
+ 
+package restaurant;
+ 
+message CreateTicketRequest {
+  string order_id      = 1;
+  string ticket_id     = 2;
+  int32  table_number  = 3;
+  repeated TicketItemProto items = 4;
+}
+ 
+message TicketItemProto {
+  string dish_id   = 1;
+  string dish_name = 2;
+  int32  quantity  = 3;
+  string station   = 4;
+  string comment   = 5;
+}
+ 
+message CreateTicketResponse {
+  string ticket_id    = 1;
+  string status       = 2;
+  int32  eta_minutes  = 3;
+}
+ 
+message GetTicketRequest {
+  string ticket_id = 1;
+}
+ 
+message TicketDto {
+  string   ticket_id    = 1;
+  string   order_id     = 2;
+  int32    table_number = 3;
+  string   status       = 4;
+  int32    eta_minutes  = 5;
+  repeated TicketItemProto items = 6;
+  string   created_at   = 7;
+}
+ 
+message StationQueueRequest {
+  string station = 1;  // GRILL, PASTA, DESSERT, BAR
+}
+ 
+message StationQueueResponse {
+  repeated TicketDto tickets = 1;
+}
+ 
+// Server-side streaming: real-time обновления для KDS-дисплея
+message KitchenUpdateEvent {
+  string event_type  = 1;  // TICKET_CREATED, ITEM_DONE, TICKET_COMPLETED
+  string ticket_id   = 2;
+  string order_id    = 3;
+  int32  table_number = 4;
+  string station     = 5;
+  string dish_id     = 6;  // заполнено при ITEM_DONE
+  string timestamp   = 7;
+}
+ 
+service KitchenService {
+  // Unary: создать тикет (вызывается Order Service)
+  rpc CreateTicket(CreateTicketRequest) returns (CreateTicketResponse);
+ 
+  // Unary: получить тикет
+  rpc GetTicket(GetTicketRequest) returns (TicketDto);
+ 
+  // Unary: очередь станции
+  rpc GetStationQueue(StationQueueRequest) returns (StationQueueResponse);
+ 
+  // Server-side streaming: KDS-дисплей подписывается на обновления станции
+  rpc StreamStationUpdates(StationQueueRequest) returns (stream KitchenUpdateEvent);
+}

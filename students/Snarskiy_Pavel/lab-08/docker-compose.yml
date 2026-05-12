@@ -1,0 +1,196 @@
+version: "3.9"
+ 
+services:
+ 
+  # ── Инфраструктура ─────────────────────────────────────────────
+ 
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"     # Management UI → http://localhost:15672
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+ 
+  orders-db:
+    image: postgres:15-alpine
+    container_name: orders-db
+    environment:
+      POSTGRES_DB:       orders_db
+      POSTGRES_USER:     orders_user
+      POSTGRES_PASSWORD: orders_secret
+    ports:
+      - "5433:5432"
+    volumes:
+      - orders_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orders_user -d orders_db"]
+      interval: 5s
+      retries: 10
+ 
+  kitchen-db:
+    image: postgres:15-alpine
+    container_name: kitchen-db
+    environment:
+      POSTGRES_DB:       kitchen_db
+      POSTGRES_USER:     kitchen_user
+      POSTGRES_PASSWORD: kitchen_secret
+    ports:
+      - "5434:5432"
+    volumes:
+      - kitchen_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kitchen_user -d kitchen_db"]
+      interval: 5s
+      retries: 10
+ 
+  payments-db:
+    image: postgres:15-alpine
+    container_name: payments-db
+    environment:
+      POSTGRES_DB:       payments_db
+      POSTGRES_USER:     payments_user
+      POSTGRES_PASSWORD: payments_secret
+    ports:
+      - "5435:5432"
+    volumes:
+      - payments_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments_user -d payments_db"]
+      interval: 5s
+      retries: 10
+ 
+  # ── Инициализация RabbitMQ ─────────────────────────────────────
+ 
+  rabbitmq-setup:
+    build:
+      context: .
+      dockerfile: Dockerfile.setup
+    container_name: rabbitmq-setup
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: python event_bus/setup.py
+    restart: "no"
+ 
+  # ── Микросервисы ───────────────────────────────────────────────
+ 
+  order-service:
+    build:
+      context: ./services/order_service
+    container_name: order-service
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql://orders_user:orders_secret@orders-db:5432/orders_db
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      SERVICE_NAME: order-service
+    depends_on:
+      orders-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8001
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      retries: 5
+ 
+  kitchen-service:
+    build:
+      context: ./services/kitchen_service
+    container_name: kitchen-service
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: postgresql://kitchen_user:kitchen_secret@kitchen-db:5432/kitchen_db
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      SERVICE_NAME: kitchen-service
+    depends_on:
+      kitchen-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8002
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      retries: 5
+ 
+  payment-service:
+    build:
+      context: ./services/payment_service
+    container_name: payment-service
+    ports:
+      - "8003:8003"
+    environment:
+      DATABASE_URL: postgresql://payments_user:payments_secret@payments-db:5432/payments_db
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      STRIPE_API_KEY: sk_test_placeholder
+      SERVICE_NAME: payment-service
+    depends_on:
+      payments-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8003
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 10s
+      retries: 5
+ 
+  notification-service:
+    build:
+      context: ./services/notification_service
+    container_name: notification-service
+    ports:
+      - "8004:8004"
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      SERVICE_NAME: notification-service
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8004
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 10s
+      retries: 5
+ 
+  # ── API Gateway ────────────────────────────────────────────────
+ 
+  api-gateway:
+    image: nginx:1.25-alpine
+    container_name: api-gateway
+    ports:
+      - "80:80"
+    volumes:
+      - ./api-gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      order-service:
+        condition: service_healthy
+      kitchen-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 10s
+      retries: 5
+ 
+volumes:
+  rabbitmq_data:
+  orders_db_data:
+  kitchen_db_data:
+  payments_db_data:
